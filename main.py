@@ -1,148 +1,237 @@
-# import time
-# import pyautogui
-# import pytesseract
-# from PIL import Image
-# from plyer import notification
-# from pynput import mouse
-#
-# # Tesseract path
-# pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
-#
-# completion_keywords = ["installation complete", "finish", "done", "success"]
-#
-# # Global variables to store drag coordinates
-# start_x = start_y = end_x = end_y = 0
-# region_selected = False
-#
-# def on_click(x, y, button, pressed):
-#     global start_x, start_y, end_x, end_y, region_selected
-#
-#     if pressed:
-#         # Mouse button pressed → start of drag
-#         start_x, start_y = x, y
-#     else:
-#         # Mouse button released → end of drag
-#         end_x, end_y = x, y
-#         region_selected = True
-#         print(f"Selected region: ({start_x}, {start_y}, {end_x - start_x}, {end_y - start_y})")
-#         # Stop listener after drag
-#         return False
-#
-# # Let user drag to select region
-# print("Drag to select the screen region to monitor...")
-# with mouse.Listener(on_click=on_click) as listener:
-#     listener.join()
-#
-# # Calculate width and height
-# width = end_x - start_x
-# height = end_y - start_y
-# SCREEN_REGION = (start_x, start_y, width, height)
-#
-# # Optional Finish button coordinates
-# # You can also drag select it separately if you want
-# FINISH_BUTTON = (start_x + width//2, start_y + height - 20)  # roughly bottom center
-#
-# def check_installation():
-#     screenshot = pyautogui.screenshot(region=SCREEN_REGION)
-#     gray_screenshot = screenshot.convert('L')
-#     text = pytesseract.image_to_string(gray_screenshot).lower()
-#     print(text)
-#     for keyword in completion_keywords:
-#         if keyword in text:
-#             return True
-#     return False
-#
-# def on_success():
-#     print("✅ Installation Complete!")
-#     # Optional click
-#     # pyautogui.click(FINISH_BUTTON[0], FINISH_BUTTON[1])
-#     notification.notify(title="ActionOnFinish", message="Installation Complete!", timeout=5)
-#
-# def on_failure():
-#     print("⏳ Still installing...")
-#
-# # Main loop
-# while True:
-#     if check_installation():
-#         on_success()
-#         break
-#     else:
-#         on_failure()
-#     time.sleep(5)
-
-
-
+import sys
+import os
 import time
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QComboBox, QLineEdit,
+    QTextEdit, QCheckBox, QSpinBox, QGroupBox
+)
+from PyQt6.QtCore import QThread, pyqtSignal
 from pywinauto import Desktop
 from plyer import notification
 
-# Keywords indicating installation completion
-completion_keywords = ["finish", "done", "installation complete", "success"]
+# -------------------------------
+# Monitoring Thread
+# -------------------------------
+class MonitorThread(QThread):
+    status_signal = pyqtSignal(str)
+    finished_signal = pyqtSignal()
 
-# 1️⃣ List all visible windows
-windows = Desktop(backend="uia").windows()
-windows_titles = [w.window_text() for w in windows if w.window_text().strip()]
+    def __init__(self, window_title, keywords, interval, action, custom_command, log_file):
+        super().__init__()
+        self.window_title = window_title
+        self.keywords = keywords
+        self.interval = interval
+        self.action = action
+        self.custom_command = custom_command
+        self.log_file = log_file
+        self.running = True
 
-if not windows_titles:
-    print("No visible windows found. Please open the installer first.")
-    exit(1)
+    def run(self):
+        try:
+            window = Desktop(backend="uia").window(title=self.window_title)
+        except Exception as e:
+            self.status_signal.emit(f"Error connecting to window: {e}")
+            return
 
-print("Select a window to monitor:")
-for i, title in enumerate(windows_titles):
-    print(f"{i+1}: {title}")
-
-choice = int(input("Enter the number of the window: ")) - 1
-WINDOW_TITLE = windows_titles[choice]
-
-# Connect to the selected window
-window = Desktop(backend="uia").window(title=WINDOW_TITLE)
-print(f"Monitoring window: {WINDOW_TITLE}")
-
-# Optional: specify Finish button title (if you want to click it)
-FINISH_BUTTON_TITLE = "Finish"  # Adjust if your installer uses a different label
-
-# 2️⃣ Main loop: monitor window
-while True:
-    try:
-        window.set_focus()  # Bring window to front
-
-        # Get text from all controls in the window
-        texts = [ctrl.window_text() for ctrl in window.descendants()]
-
-        # Check for completion keywords
-        detected = False
-        for t in texts:
-            for keyword in completion_keywords:
-                if keyword.lower() in t.lower():
-                    detected = True
-                    break
-            if detected:
-                break
-
-        if detected:
-            print("✅ Installation Complete!")
-
-            # Optional: click Finish button
+        while self.running:
             try:
-                finish_btn = window.child_window(title=FINISH_BUTTON_TITLE, control_type="Button")
+                window.set_focus()
+                texts = [ctrl.window_text() for ctrl in window.descendants()]
+                detected = False
+                for t in texts:
+                    for keyword in self.keywords:
+                        if keyword.lower() in t.lower():
+                            detected = True
+                            break
+                    if detected:
+                        break
+
+                if detected:
+                    self.status_signal.emit("✅ Installation Complete!")
+                    self.perform_action()
+                    self.finished_signal.emit()
+                    break
+                else:
+                    self.status_signal.emit("⏳ Still installing...")
+            except Exception as e:
+                self.status_signal.emit(f"Error: {e}")
+            time.sleep(self.interval)
+
+    def perform_action(self):
+        # Execute predefined actions
+        if self.action == "Show Notification":
+            notification.notify(title="ActionOnFinish", message="Installation Complete!", timeout=5)
+        elif self.action == "Click Finish Button":
+            try:
+                finish_btn = Desktop(backend="uia").window(title=self.window_title).child_window(title="Finish", control_type="Button")
                 if finish_btn.exists():
                     finish_btn.click_input()
-                    print("Clicked Finish button.")
-            except Exception as e:
-                print(f"No Finish button clicked: {e}")
+                    self.status_signal.emit("Clicked Finish button.")
+            except:
+                self.status_signal.emit("Finish button not found.")
+        elif self.action == "Shut Down PC":
+            os.system("shutdown /s /t 5")
+        elif self.action == "Restart PC":
+            os.system("shutdown /r /t 5")
+        elif self.action == "Run Custom Command" and self.custom_command:
+            os.system(self.custom_command)
 
-            # Send desktop notification
-            notification.notify(title="ActionOnFinish", message="Installation Complete!", timeout=5)
+        # Log if needed
+        if self.log_file:
+            with open(self.log_file, "a") as f:
+                f.write(f"Action '{self.action}' executed at {time.ctime()}\n")
 
-            # Log to file
-            with open("installation_log.txt", "a") as f:
-                f.write(f"Installation completed at {time.ctime()}\n")
+    def stop(self):
+        self.running = False
+        self.quit()
+        self.wait()
 
-            break
-        else:
-            print("⏳ Still installing...")
+# -------------------------------
+# Main GUI Window
+# -------------------------------
+class ActionOnFinishGUI(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("ActionOnFinish")
+        self.setGeometry(200, 100, 650, 500)
+        self.monitor_thread = None
+        self.initUI()
 
-    except Exception as e:
-        print(f"Error: {e}")
+    def initUI(self):
+        layout = QVBoxLayout()
 
-    time.sleep(2)  # Check every 2 seconds
+        # --- Window Selection ---
+        window_group = QGroupBox("Window Selection")
+        window_layout = QHBoxLayout()
+        window_layout.addWidget(QLabel("Select App/Window:"))
+
+        self.window_dropdown = QComboBox()
+        self.window_dropdown.setStyleSheet("padding:5px; font-size:14px;")
+        window_layout.addWidget(self.window_dropdown)
+
+        refresh_btn = QPushButton("Refresh")
+        refresh_btn.clicked.connect(self.refresh_windows)
+        window_layout.addWidget(refresh_btn)
+        window_group.setLayout(window_layout)
+        layout.addWidget(window_group)
+
+        # --- Completion Keywords ---
+        keyword_group = QGroupBox("Completion Detection")
+        keyword_layout = QVBoxLayout()
+        keyword_layout.addWidget(QLabel("Completion Keywords (comma separated):"))
+        self.keywords_input = QLineEdit("finish, done, installation complete, success")
+        keyword_layout.addWidget(self.keywords_input)
+
+        interval_layout = QHBoxLayout()
+        interval_layout.addWidget(QLabel("Check Interval (seconds):"))
+        self.interval_spin = QSpinBox()
+        self.interval_spin.setMinimum(1)
+        self.interval_spin.setValue(2)
+        interval_layout.addWidget(self.interval_spin)
+        keyword_layout.addLayout(interval_layout)
+        keyword_group.setLayout(keyword_layout)
+        layout.addWidget(keyword_group)
+
+        # --- Actions on Completion ---
+        action_group = QGroupBox("Actions on Completion")
+        action_layout = QVBoxLayout()
+        self.action_dropdown = QComboBox()
+        self.action_dropdown.addItems([
+            "Do Nothing",
+            "Show Notification",
+            "Click Finish Button",
+            "Shut Down PC",
+            "Restart PC",
+            "Run Custom Command"
+        ])
+        self.action_dropdown.currentTextChanged.connect(self.toggle_command_input)
+        action_layout.addWidget(QLabel("Select Action:"))
+        action_layout.addWidget(self.action_dropdown)
+
+        self.command_input = QLineEdit()
+        self.command_input.setPlaceholderText("Enter custom command")
+        self.command_input.setVisible(False)
+        action_layout.addWidget(self.command_input)
+
+        self.log_cb = QCheckBox("Log action to file")
+        self.log_file_input = QLineEdit()
+        self.log_file_input.setPlaceholderText("Log file path")
+        action_layout.addWidget(self.log_cb)
+        action_layout.addWidget(self.log_file_input)
+
+        action_group.setLayout(action_layout)
+        layout.addWidget(action_group)
+
+        # --- Status Panel ---
+        status_group = QGroupBox("Status")
+        status_layout = QVBoxLayout()
+        self.status_display = QTextEdit()
+        self.status_display.setReadOnly(True)
+        status_layout.addWidget(self.status_display)
+        status_group.setLayout(status_layout)
+        layout.addWidget(status_group)
+
+        # --- Start / Stop Buttons ---
+        buttons_layout = QHBoxLayout()
+        self.start_btn = QPushButton("Start Monitoring")
+        self.start_btn.clicked.connect(self.start_monitoring)
+        buttons_layout.addWidget(self.start_btn)
+
+        self.stop_btn = QPushButton("Stop Monitoring")
+        self.stop_btn.clicked.connect(self.stop_monitoring)
+        buttons_layout.addWidget(self.stop_btn)
+        layout.addLayout(buttons_layout)
+
+        self.setLayout(layout)
+        self.refresh_windows()
+
+    # --- Functions ---
+    def refresh_windows(self):
+        self.window_dropdown.clear()
+        windows = Desktop(backend="uia").windows()
+        for w in windows:
+            title = w.window_text().strip()
+            if title:
+                self.window_dropdown.addItem(title)
+
+    def toggle_command_input(self, action):
+        self.command_input.setVisible(action == "Run Custom Command")
+
+    def start_monitoring(self):
+        window_title = self.window_dropdown.currentText()
+        if not window_title:
+            self.status_display.append("❌ No window selected.")
+            return
+
+        keywords = [k.strip() for k in self.keywords_input.text().split(",") if k.strip()]
+        interval = self.interval_spin.value()
+        action = self.action_dropdown.currentText()
+        custom_command = self.command_input.text() if action == "Run Custom Command" else None
+        log_file = self.log_file_input.text() if self.log_cb.isChecked() else None
+
+        self.monitor_thread = MonitorThread(window_title, keywords, interval, action, custom_command, log_file)
+        self.monitor_thread.status_signal.connect(self.update_status)
+        self.monitor_thread.finished_signal.connect(self.monitor_finished)
+        self.monitor_thread.start()
+        self.status_display.append(f"Started monitoring window: {window_title}")
+
+    def stop_monitoring(self):
+        if self.monitor_thread:
+            self.monitor_thread.stop()
+            self.status_display.append("Monitoring stopped.")
+
+    def update_status(self, message):
+        self.status_display.append(message)
+
+    def monitor_finished(self):
+        self.status_display.append("✅ Monitoring finished.")
+
+# -------------------------------
+# Run App
+# -------------------------------
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = ActionOnFinishGUI()
+    window.show()
+    sys.exit(app.exec())
